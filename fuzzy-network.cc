@@ -15,6 +15,7 @@
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <fstream>
 
 using namespace ns3;
 
@@ -126,32 +127,59 @@ const uint32_t MAX_DATARATE_BPS = 10000000;      // 10 Mbps
 const double CSMA_DATARATE_MBPS = 100.0;
 const double SIMULATION_DURATION_SECONDS = 21.0;
 
-void ControlLoop(FuzzyLogicController* controller, Ptr<FlowMonitor> monitor, FlowMonitorHelper* flowmon, Ptr<OnOffApplication> app, Ipv4InterfaceContainer csmaInterfaces, Ipv4InterfaceContainer serverInterfaces) {
-    monitor->CheckForLostPackets();
-    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowmon->GetClassifier());
-    FlowMonitor::FlowStatsContainer stats = monitor->GetFlowStats();
+class SimulationController {
+public:
+    SimulationController(Ptr<OnOffApplication> clientApp, Ipv4InterfaceContainer csmaInterfaces, Ipv4InterfaceContainer serverInterfaces, std::ofstream* dataFile);
+    void ControlLoop();
+
+private:
+    FuzzyLogicController m_fuzzyController;
+    FlowMonitorHelper m_flowmon;
+    Ptr<FlowMonitor> m_monitor;
+    Ptr<OnOffApplication> m_clientApp;
+    Ipv4InterfaceContainer m_csmaInterfaces;
+    Ipv4InterfaceContainer m_serverInterfaces;
+    std::ofstream* m_dataFile;
+};
+
+SimulationController::SimulationController(Ptr<OnOffApplication> clientApp, Ipv4InterfaceContainer csmaInterfaces, Ipv4InterfaceContainer serverInterfaces, std::ofstream* dataFile)
+    : m_clientApp(clientApp), m_csmaInterfaces(csmaInterfaces), m_serverInterfaces(serverInterfaces), m_dataFile(dataFile) {
+    m_monitor = m_flowmon.InstallAll();
+}
+
+void SimulationController::ControlLoop() {
+    m_monitor->CheckForLostPackets();
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(m_flowmon.GetClassifier());
+    FlowMonitor::FlowStatsContainer stats = m_monitor->GetFlowStats();
     for (auto it = stats.begin(); it != stats.end(); ++it) {
         Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(it->first);
-        if (t.sourceAddress == csmaInterfaces.GetAddress(1) && t.destinationAddress == serverInterfaces.GetAddress(0)) {
+        if (t.sourceAddress == m_csmaInterfaces.GetAddress(1) && t.destinationAddress == m_serverInterfaces.GetAddress(0)) {
             if (it->second.timeLastRxPacket.GetSeconds() > it->second.timeFirstTxPacket.GetSeconds()){
                 double currentBandwidthMbps = (it->second.rxBytes * 8.0) / (it->second.timeLastRxPacket.GetSeconds() - it->second.timeFirstTxPacket.GetSeconds()) / 1e6;
                 double currentThroughputRatio = currentBandwidthMbps / CSMA_DATARATE_MBPS;
                 double currentLatencyMs = (it->second.delaySum.GetSeconds() / it->second.rxPackets) * 1000;
 
-                double newPriority = controller->evaluate(currentBandwidthMbps, currentLatencyMs, currentThroughputRatio);
+                double newPriority = m_fuzzyController.evaluate(currentBandwidthMbps, currentLatencyMs, currentThroughputRatio);
 
                 uint32_t newRateBps = MIN_DATARATE_BPS + (newPriority / 10.0) * (MAX_DATARATE_BPS - MIN_DATARATE_BPS);
                 DataRate newRate(newRateBps);
-                app->SetAttribute("DataRate", DataRateValue(newRate));
+                m_clientApp->SetAttribute("DataRate", DataRateValue(newRate));
+
                 NS_LOG_INFO(Simulator::Now().GetSeconds() << "s - Fuzzy Controller: Bandwidth=" << currentBandwidthMbps << "Mbps, Latency=" << currentLatencyMs << "ms, ThroughputRatio=" << currentThroughputRatio << " -> New Priority=" << newPriority << ", New Rate=" << newRate);
+                *m_dataFile << Simulator::Now().GetSeconds() << "\t" << currentLatencyMs << "\t" << currentThroughputRatio << "\t" << newRateBps << std::endl;
             }
         }
     }
-    Simulator::Schedule(Seconds(1.0), &ControlLoop, controller, monitor, flowmon, app, csmaInterfaces, serverInterfaces);
+    Simulator::Schedule(Seconds(1.0), &SimulationController::ControlLoop, this);
 }
 
 
 int main(int argc, char* argv[]) {
+    // --- File Stream for Gnuplot ---
+    std::ofstream dataFile;
+    dataFile.open("results.dat");
+    dataFile << "# Time (s)\tLatency (ms)\tThroughput (Ratio)\tNew Rate (bps)" << std::endl;
+
     LogComponentEnable("FuzzyLogicNetwork", LOG_LEVEL_INFO);
     NodeContainer serverNode, routerNode;
     serverNode.Create(1);
@@ -223,17 +251,19 @@ int main(int argc, char* argv[]) {
     clientApps.Stop(Seconds(20.0));
     Ptr<OnOffApplication> clientApp = DynamicCast<OnOffApplication>(clientApps.Get(0));
 
-    FuzzyLogicController fuzzyController;
-    FlowMonitorHelper flowmon;
-    Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+    // Create the simulation controller
+    SimulationController controller(clientApp, csmaInterfaces, serverToRouterInterfaces, &dataFile);
 
     // Schedule the first call to the control loop
-    Simulator::Schedule(Seconds(3.0), &ControlLoop, &fuzzyController, monitor, &flowmon, clientApp, csmaInterfaces, serverToRouterInterfaces);
+    Simulator::Schedule(Seconds(3.0), &SimulationController::ControlLoop, &controller);
 
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
     AnimationInterface anim("fuzzy-network.xml");
     Simulator::Stop(Seconds(SIMULATION_DURATION_SECONDS));
     Simulator::Run();
+
+    dataFile.close(); // Close the data file
+
     Simulator::Destroy();
     NS_LOG_INFO("Simulation finished.");
     return 0;
