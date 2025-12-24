@@ -174,6 +174,8 @@ void SimulationController::ControlLoop() {
         case QLearningAgent::MAINTAIN_RATE:
             // Do nothing
             break;
+        default:
+            break;
     }
     m_clientApp->SetAttribute("DataRate", DataRateValue(newRate));
 
