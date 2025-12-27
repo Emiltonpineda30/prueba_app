@@ -21,79 +21,111 @@ using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("FuzzyLogicNetwork");
 
+// --- FUZZY LOGIC CONTROLLER IMPLEMENTATION ---
+namespace ns3 {
+
+struct FuzzySet {
+    double a, b, c, d;
+    double getMembership(double value) const;
+};
+
+class LinguisticVariable {
+public:
+    void addSet(std::string name, FuzzySet set);
+    std::map<std::string, double> fuzzify(double crispValue);
+private:
+    std::map<std::string, FuzzySet> m_sets;
+};
+
+class FuzzyLogicController {
+public:
+    FuzzyLogicController();
+    double evaluate(double bandwidth, double latency, double throughput);
+private:
+    LinguisticVariable m_bandwidth;
+    LinguisticVariable m_latency;
+    LinguisticVariable m_throughput;
+    LinguisticVariable m_priority;
+    void initialize();
+};
+
+double FuzzySet::getMembership(double value) const {
+    if (value >= b && value <= c) return 1.0;
+    if (value > a && value < b) return (value - a) / (b - a);
+    if (value > c && value < d) return (d - value) / (d - c);
+    return 0.0;
+}
+
+void LinguisticVariable::addSet(std::string name, FuzzySet set) {
+    m_sets[name] = set;
+}
+
+std::map<std::string, double> LinguisticVariable::fuzzify(double crispValue) {
+    std::map<std::string, double> fuzzyValues;
+    for (auto const& [name, set] : m_sets) {
+        fuzzyValues[name] = set.getMembership(crispValue);
+    }
+    return fuzzyValues;
+}
+
+FuzzyLogicController::FuzzyLogicController() {
+    initialize();
+}
+
+void FuzzyLogicController::initialize() {
+    m_bandwidth.addSet("Low", {0, 0, 20, 40});
+    m_bandwidth.addSet("Medium", {20, 40, 60, 80});
+    m_bandwidth.addSet("High", {60, 80, 100, 100});
+    m_latency.addSet("Low", {0, 0, 10, 30});
+    m_latency.addSet("Medium", {10, 30, 50, 70});
+    m_latency.addSet("High", {50, 70, 100, 100});
+    m_throughput.addSet("Low", {0, 0, 0.2, 0.4});
+    m_throughput.addSet("Medium", {0.2, 0.4, 0.6, 0.8});
+    m_throughput.addSet("High", {0.6, 0.8, 1.0, 1.0});
+    m_priority.addSet("Low", {0, 0, 2, 4});
+    m_priority.addSet("Medium", {2, 4, 6, 8});
+    m_priority.addSet("High", {6, 8, 10, 10});
+}
+
+double FuzzyLogicController::evaluate(double bandwidth, double latency, double throughput) {
+    auto bw_fuzzy = m_bandwidth.fuzzify(bandwidth);
+    auto lat_fuzzy = m_latency.fuzzify(latency);
+    auto thr_fuzzy = m_throughput.fuzzify(throughput);
+
+    double high_priority_strength = std::min(bw_fuzzy["High"], lat_fuzzy["Low"]);
+    double medium_priority_strength = std::max(bw_fuzzy["Medium"], thr_fuzzy["Medium"]);
+    double low_priority_strength = std::max(lat_fuzzy["High"], thr_fuzzy["Low"]);
+
+    if (bw_fuzzy["Low"] > 0 && lat_fuzzy["High"] > 0) {
+        low_priority_strength = std::max(low_priority_strength, std::min(bw_fuzzy["Low"], lat_fuzzy["High"]));
+    }
+    if (thr_fuzzy["High"] > 0) {
+        high_priority_strength = std::max(high_priority_strength, thr_fuzzy["High"]);
+    }
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (double x = 0; x <= 10; x += 0.5) {
+        double clipped_low = std::min(low_priority_strength, m_priority.fuzzify(x)["Low"]);
+        double clipped_medium = std::min(medium_priority_strength, m_priority.fuzzify(x)["Medium"]);
+        double clipped_high = std::min(high_priority_strength, m_priority.fuzzify(x)["High"]);
+        double membership_val = std::max({clipped_low, clipped_medium, clipped_high});
+        numerator += x * membership_val;
+        denominator += membership_val;
+    }
+
+    if (denominator == 0) return 0;
+    return numerator / denominator;
+}
+
+} // namespace ns3
+// --- END OF FUZZY LOGIC CONTROLLER ---
+
 // --- Simulation Constants ---
 const uint32_t MIN_DATARATE_BPS = 1000000;       // 1 Mbps
 const uint32_t MAX_DATARATE_BPS = 10000000;      // 10 Mbps
 const double CSMA_DATARATE_MBPS = 100.0;
 const double SIMULATION_DURATION_SECONDS = 21.0;
-
-// --- Q-LEARNING AGENT IMPLEMENTATION ---
-class QLearningAgent {
-public:
-    enum State {
-        LOW_LATENCY_HIGH_TP,
-        LOW_LATENCY_LOW_TP,
-        HIGH_LATENCY_HIGH_TP,
-        HIGH_LATENCY_LOW_TP,
-        STATE_COUNT
-    };
-
-    enum Action {
-        INCREASE_RATE,
-        MAINTAIN_RATE,
-        DECREASE_RATE,
-        ACTION_COUNT
-    };
-
-    QLearningAgent(double alpha, double gamma, double epsilon);
-    Action ChooseAction(State currentState);
-    void UpdateQValue(State oldState, Action action, double reward, State newState);
-    State GetState(double latency, double throughput);
-
-private:
-    double m_alpha;   // Learning rate
-    double m_gamma;   // Discount factor
-    double m_epsilon; // Exploration rate
-    std::map<State, std::vector<double>> m_qTable;
-    Ptr<UniformRandomVariable> m_random;
-};
-
-QLearningAgent::QLearningAgent(double alpha, double gamma, double epsilon)
-    : m_alpha(alpha), m_gamma(gamma), m_epsilon(epsilon) {
-    m_random = CreateObject<UniformRandomVariable>();
-    for (int i = 0; i < STATE_COUNT; ++i) {
-        m_qTable[(State)i] = std::vector<double>(ACTION_COUNT, 0.0);
-    }
-}
-
-QLearningAgent::State QLearningAgent::GetState(double latency, double throughput) {
-    bool isLowLatency = latency < 5.0; // Threshold in ms
-    bool isHighThroughput = throughput > 0.5; // Threshold for ratio
-    if (isLowLatency && isHighThroughput) return LOW_LATENCY_HIGH_TP;
-    if (isLowLatency && !isHighThroughput) return LOW_LATENCY_LOW_TP;
-    if (!isLowLatency && isHighThroughput) return HIGH_LATENCY_HIGH_TP;
-    return HIGH_LATENCY_LOW_TP;
-}
-
-QLearningAgent::Action QLearningAgent::ChooseAction(State currentState) {
-    if (m_random->GetValue() < m_epsilon) {
-        // Exploration
-        return (Action)m_random->GetInteger(0, ACTION_COUNT - 1);
-    } else {
-        // Exploitation
-        auto it = std::max_element(m_qTable[currentState].begin(), m_qTable[currentState].end());
-        return (Action)std::distance(m_qTable[currentState].begin(), it);
-    }
-}
-
-void QLearningAgent::UpdateQValue(State oldState, Action action, double reward, State newState) {
-    double old_value = m_qTable[oldState][action];
-    double next_max = *std::max_element(m_qTable[newState].begin(), m_qTable[newState].end());
-
-    double new_value = (1 - m_alpha) * old_value + m_alpha * (reward + m_gamma * next_max);
-    m_qTable[oldState][action] = new_value;
-}
-// --- END OF Q-LEARNING AGENT ---
 
 class SimulationController {
 public:
@@ -101,94 +133,43 @@ public:
     void ControlLoop();
 
 private:
-    QLearningAgent m_agent;
-    QLearningAgent::State m_currentState;
+    FuzzyLogicController m_fuzzyController;
     FlowMonitorHelper m_flowmon;
     Ptr<FlowMonitor> m_monitor;
     Ptr<OnOffApplication> m_clientApp;
     Ipv4InterfaceContainer m_csmaInterfaces;
     Ipv4InterfaceContainer m_serverInterfaces;
     std::ofstream* m_dataFile;
-
-    double CalculateReward(QLearningAgent::State state);
 };
 
 SimulationController::SimulationController(Ptr<OnOffApplication> clientApp, Ipv4InterfaceContainer csmaInterfaces, Ipv4InterfaceContainer serverInterfaces, std::ofstream* dataFile)
-    : m_agent(0.1, 0.9, 0.1), // alpha, gamma, epsilon
-      m_clientApp(clientApp),
-      m_csmaInterfaces(csmaInterfaces),
-      m_serverInterfaces(serverInterfaces),
-      m_dataFile(dataFile) {
+    : m_clientApp(clientApp), m_csmaInterfaces(csmaInterfaces), m_serverInterfaces(serverInterfaces), m_dataFile(dataFile) {
     m_monitor = m_flowmon.InstallAll();
-    m_currentState = QLearningAgent::LOW_LATENCY_LOW_TP; // Initial state
-}
-
-double SimulationController::CalculateReward(QLearningAgent::State state) {
-    if (state == QLearningAgent::LOW_LATENCY_HIGH_TP) return 10.0;
-    if (state == QLearningAgent::LOW_LATENCY_LOW_TP) return -1.0;
-    if (state == QLearningAgent::HIGH_LATENCY_HIGH_TP) return -5.0;
-    if (state == QLearningAgent::HIGH_LATENCY_LOW_TP) return -10.0;
-    return 0.0;
 }
 
 void SimulationController::ControlLoop() {
     m_monitor->CheckForLostPackets();
     Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(m_flowmon.GetClassifier());
     FlowMonitor::FlowStatsContainer stats = m_monitor->GetFlowStats();
-
-    double currentLatencyMs = 0;
-    double currentThroughputRatio = 0;
-
     for (auto it = stats.begin(); it != stats.end(); ++it) {
         Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(it->first);
         if (t.sourceAddress == m_csmaInterfaces.GetAddress(1) && t.destinationAddress == m_serverInterfaces.GetAddress(0)) {
             if (it->second.timeLastRxPacket.GetSeconds() > it->second.timeFirstTxPacket.GetSeconds()){
-                currentLatencyMs = (it->second.delaySum.GetSeconds() / it->second.rxPackets) * 1000;
                 double currentBandwidthMbps = (it->second.rxBytes * 8.0) / (it->second.timeLastRxPacket.GetSeconds() - it->second.timeFirstTxPacket.GetSeconds()) / 1e6;
-                currentThroughputRatio = currentBandwidthMbps / CSMA_DATARATE_MBPS;
+                double currentThroughputRatio = currentBandwidthMbps / CSMA_DATARATE_MBPS;
+                double currentLatencyMs = (it->second.delaySum.GetSeconds() / it->second.rxPackets) * 1000;
+
+                double newPriority = m_fuzzyController.evaluate(currentBandwidthMbps, currentLatencyMs, currentThroughputRatio);
+
+                uint32_t newRateBps = MIN_DATARATE_BPS + (newPriority / 10.0) * (MAX_DATARATE_BPS - MIN_DATARATE_BPS);
+                DataRate newRate(newRateBps);
+                m_clientApp->SetAttribute("DataRate", DataRateValue(newRate));
+
+                NS_LOG_INFO(Simulator::Now().GetSeconds() << "s - Fuzzy Controller: Bandwidth=" << currentBandwidthMbps << "Mbps, Latency=" << currentLatencyMs << "ms, ThroughputRatio=" << currentThroughputRatio << " -> New Priority=" << newPriority << ", New Rate=" << newRate);
+                *m_dataFile << Simulator::Now().GetSeconds() << "\t" << currentLatencyMs << "\t" << currentThroughputRatio << "\t" << newRateBps << std::endl;
             }
         }
     }
-
-    QLearningAgent::State newState = m_agent.GetState(currentLatencyMs, currentThroughputRatio);
-    double reward = CalculateReward(newState);
-
-    // The learning step happens here, based on the *previous* action and the *new* state
-    QLearningAgent::Action action = m_agent.ChooseAction(m_currentState);
-    m_agent.UpdateQValue(m_currentState, action, reward, newState);
-    m_currentState = newState;
-
-    // Execute the chosen action
-    DataRateValue currentRateValue;
-    m_clientApp->GetAttribute("DataRate", currentRateValue);
-    DataRate currentRate = currentRateValue.Get();
-
-    DataRate newRate = currentRate;
-    switch (action) {
-        case QLearningAgent::INCREASE_RATE:
-            newRate = DataRate(std::min((uint32_t)currentRate.GetBitRate() + 100000, MAX_DATARATE_BPS));
-            break;
-        case QLearningAgent::DECREASE_RATE:
-            newRate = DataRate(std::max((uint32_t)currentRate.GetBitRate() - 100000, MIN_DATARATE_BPS));
-            break;
-        case QLearningAgent::MAINTAIN_RATE:
-            // Do nothing
-            break;
-        default:
-            break;
-    }
-    m_clientApp->SetAttribute("DataRate", DataRateValue(newRate));
-
-    NS_LOG_INFO(Simulator::Now().GetSeconds() << "s - RL Agent: "
-        << " Latency=" << currentLatencyMs << "ms"
-        << ", Throughput=" << currentThroughputRatio
-        << ", State=" << newState
-        << ", Reward=" << reward
-        << ", Action=" << action
-        << ", New Rate=" << newRate);
-
-    *m_dataFile << Simulator::Now().GetSeconds() << "\t" << currentLatencyMs << "\t" << currentThroughputRatio << "\t" << newRate.GetBitRate() << std::endl;
-
     Simulator::Schedule(Seconds(1.0), &SimulationController::ControlLoop, this);
 }
 
@@ -196,7 +177,7 @@ void SimulationController::ControlLoop() {
 int main(int argc, char* argv[]) {
     // --- File Stream for Gnuplot ---
     std::ofstream dataFile;
-    dataFile.open("rl_results.dat");
+    dataFile.open("results.dat");
     dataFile << "# Time (s)\tLatency (ms)\tThroughput (Ratio)\tNew Rate (bps)" << std::endl;
 
     LogComponentEnable("FuzzyLogicNetwork", LOG_LEVEL_INFO);
@@ -274,14 +255,14 @@ int main(int argc, char* argv[]) {
     SimulationController controller(clientApp, csmaInterfaces, serverToRouterInterfaces, &dataFile);
 
     // Schedule the first call to the control loop
-    Simulator::Schedule(Seconds(2.0), &SimulationController::ControlLoop, &controller);
+    Simulator::Schedule(Seconds(3.0), &SimulationController::ControlLoop, &controller);
 
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
-    AnimationInterface anim("rl-network.xml");
+    AnimationInterface anim("fuzzy-network.xml");
     Simulator::Stop(Seconds(SIMULATION_DURATION_SECONDS));
     Simulator::Run();
 
-    dataFile.close();
+    dataFile.close(); // Close the data file
 
     Simulator::Destroy();
     NS_LOG_INFO("Simulation finished.");
